@@ -1,4 +1,4 @@
-# CSV Data Quality Analyzer — dependencies
+# Data Quality Analyzer — dependencies
 #
 # Install with:
 #   pip install -r requirements.txt
@@ -6,6 +6,12 @@
 # If ydata-profiling was already installed, remove it first:
 #   pip uninstall ydata-profiling
 #   pip install -r requirements.txt
-
+ 
+# Core
 ydata-profiling-multilingual>=1.1.1
 pandas>=1.5.0
+ 
+# Excel / ODS support
+openpyxl>=3.0.0    # .xlsx
+xlrd>=2.0.0        # .xls
+odfpy>=1.4.0       # .ods
