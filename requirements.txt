@@ -1,0 +1,11 @@
+# CSV Data Quality Analyzer — dependencies
+#
+# Install with:
+#   pip install -r requirements.txt
+#
+# If ydata-profiling was already installed, remove it first:
+#   pip uninstall ydata-profiling
+#   pip install -r requirements.txt
+
+ydata-profiling-multilingual>=1.1.1
+pandas>=1.5.0
