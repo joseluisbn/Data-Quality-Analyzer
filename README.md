@@ -1,4 +1,7 @@
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+![Python](https://img.shields.io/badge/python-3.9+-blue.svg)
+[![ydata-profiling](https://img.shields.io/badge/powered%20by-ydata--profiling-orange)](https://github.com/ydataai/ydata-profiling)
+![Formats](https://img.shields.io/badge/formats-CSV%20%7C%20XLSX%20%7C%20XLS%20%7C%20ODS-green)
 # Data Quality Analyzer
 
 Automatically generates HTML data quality reports for all files in the `data/` folder, using [ydata-profiling](https://github.com/ydataai/ydata-profiling).
