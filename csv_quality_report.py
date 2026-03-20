@@ -1,30 +1,33 @@
 """
-CSV Data Quality Analyzer using ydata-profiling
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Data Quality Analyzer using ydata-profiling
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Supported formats: CSV, XLSX, XLS, ODS
+Excel files with multiple sheets generate one report per sheet.
 
 Project structure:
     root/
-    ├── csv_quality_report.py   ← this script
+    ├── data_quality_report.py  ← this script
     ├── lang/                   ← translation files (es.json, ...)
-    ├── data/                   ← CSV files to analyze
+    ├── data/                   ← files to analyze (.csv, .xlsx, .xls, .ods)
     ├── reports/                ← generated HTML reports
     └── logs/                   ← execution logs (auto-created)
 
 Installation:
-    pip install ydata-profiling-multilingual pandas
+    pip install ydata-profiling-multilingual pandas openpyxl xlrd odfpy
 
     If ydata-profiling was already installed:
         pip uninstall ydata-profiling
-        pip install ydata-profiling-multilingual pandas
+        pip install ydata-profiling-multilingual pandas openpyxl xlrd odfpy
 
 Usage:
-    python csv_quality_report.py                    # Spanish by default
-    python csv_quality_report.py --lang en          # English only
-    python csv_quality_report.py --lang both        # both languages
-    python csv_quality_report.py --sep ";"          # manual separator
-    python csv_quality_report.py --encoding latin-1 # manual encoding
-    python csv_quality_report.py --sample 50000     # limit rows per file
-    python csv_quality_report.py --minimal          # fast mode
+    python data_quality_report.py                    # Spanish by default
+    python data_quality_report.py --lang en          # English only
+    python data_quality_report.py --lang both        # both languages
+    python data_quality_report.py --sep ";"          # CSV separator (manual)
+    python data_quality_report.py --encoding latin-1 # CSV encoding (manual)
+    python data_quality_report.py --sample 50000     # limit rows per sheet
+    python data_quality_report.py --minimal          # fast mode
 """
 
 # ─────────────────────────────────────────────────────────────
@@ -59,6 +62,13 @@ except ImportError:
     print("    Install it with:  pip install ydata-profiling-multilingual pandas\n")
     sys.exit(1)
 
+# Optional Excel engines — checked at runtime per file type
+EXCEL_ENGINES: Dict[str, str] = {
+    ".xlsx": "openpyxl",
+    ".xls":  "xlrd",
+    ".ods":  "odf",
+}
+
 # ─────────────────────────────────────────────────────────────
 # CONSTANTS AND CONFIGURATION
 # ─────────────────────────────────────────────────────────────
@@ -69,6 +79,11 @@ REPORTS_DIR = ROOT_DIR / "reports"
 LANG_DIR    = ROOT_DIR / "lang"
 LOGS_DIR    = ROOT_DIR / "logs"
 
+# Supported file extensions
+CSV_EXTENSIONS   = {".csv"}
+EXCEL_EXTENSIONS = set(EXCEL_ENGINES.keys())
+ALL_EXTENSIONS   = CSV_EXTENSIONS | EXCEL_EXTENSIONS
+
 # Size thresholds (in cells = rows × columns)
 THRESHOLD_MINIMAL   = 5_000_000   # > 5M cells → minimal mode
 THRESHOLD_OPTIMIZED = 1_000_000   # > 1M cells → optimized mode
@@ -76,13 +91,13 @@ THRESHOLD_OPTIMIZED = 1_000_000   # > 1M cells → optimized mode
 # File size threshold for warnings (bytes)
 LARGE_FILE_WARNING = 50 * 1_048_576   # 50 MB
 
-# Encodings to try in order of preference
+# Encodings to try in order of preference (CSV only)
 ENCODING_CANDIDATES = ("utf-8-sig", "utf-8", "latin-1", "cp1252")
 
-# Separators to auto-detect
+# Separators to auto-detect (CSV only)
 SEPARATOR_CANDIDATES = (";", ",", "\t", "|")
 
-# Supported languages
+# Supported report languages
 LANGUAGES: Dict[str, Dict[str, str]] = {
     "es": {"suffix": "_informe_calidad", "title_prefix": "Calidad de datos", "flag": "🇪🇸", "label": "Spanish"},
     "en": {"suffix": "_quality_report",  "title_prefix": "Data Quality",     "flag": "🇬🇧", "label": "English"},
@@ -106,12 +121,10 @@ def setup_logging() -> logging.Logger:
         datefmt="%H:%M:%S"
     )
 
-    # Console handler — INFO and above
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(fmt)
 
-    # File handler — DEBUG and above (captures everything)
     file_handler = logging.FileHandler(log_path, encoding="utf-8")
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(fmt)
@@ -126,22 +139,29 @@ def setup_logging() -> logging.Logger:
 log: logging.Logger  # initialized in main()
 
 # ─────────────────────────────────────────────────────────────
-# DATACLASS: PER-FILE RESULT
+# DATACLASS: PER-SHEET RESULT
 # ─────────────────────────────────────────────────────────────
 
 @dataclass
-class FileResult:
-    name:          str
-    ok:            bool          = False
-    rows:          int           = 0
-    columns:       int           = 0
-    missing_pct:   float         = 0.0
-    duplicates:    int           = 0
-    file_size:     str           = ""
-    analysis_mode: str           = ""
-    total_time:    float         = 0.0
-    reports:       List[str]     = field(default_factory=list)
-    error:         Optional[str] = None
+class SheetResult:
+    """Holds quality metrics and status for a single sheet or CSV file."""
+    file_name:     str
+    sheet_name:    str            = ""        # empty for CSV
+    ok:            bool           = False
+    rows:          int            = 0
+    columns:       int            = 0
+    missing_pct:   float          = 0.0
+    duplicates:    int            = 0
+    file_size:     str            = ""
+    analysis_mode: str            = ""
+    total_time:    float          = 0.0
+    reports:       List[str]      = field(default_factory=list)
+    error:         Optional[str]  = None
+
+    @property
+    def display_name(self) -> str:
+        """Human-readable identifier shown in summaries."""
+        return f"{self.file_name} [{self.sheet_name}]" if self.sheet_name else self.file_name
 
 # ─────────────────────────────────────────────────────────────
 # DIRECTORY INITIALIZATION
@@ -179,17 +199,20 @@ def load_translations() -> bool:
         return False
 
 # ─────────────────────────────────────────────────────────────
-# CSV DISCOVERY
+# FILE DISCOVERY
 # ─────────────────────────────────────────────────────────────
 
-def find_csv_files() -> List[Path]:
-    """Returns all CSV files found in data/, sorted alphabetically."""
-    csv_files = sorted(DATA_DIR.glob("*.csv"))
-    log.debug(f"CSV files found in {DATA_DIR}: {[c.name for c in csv_files]}")
-    return csv_files
+def find_data_files() -> List[Path]:
+    """Returns all supported files found in data/, sorted alphabetically."""
+    files = sorted(
+        p for p in DATA_DIR.iterdir()
+        if p.is_file() and p.suffix.lower() in ALL_EXTENSIONS
+    )
+    log.debug(f"Files found in {DATA_DIR}: {[f.name for f in files]}")
+    return files
 
 # ─────────────────────────────────────────────────────────────
-# ENCODING AND SEPARATOR DETECTION
+# ENCODING AND SEPARATOR DETECTION (CSV only)
 # ─────────────────────────────────────────────────────────────
 
 def detect_encoding(path: Path) -> str:
@@ -224,18 +247,15 @@ def detect_separator(path: Path, encoding: str) -> str:
 # ─────────────────────────────────────────────────────────────
 
 def load_csv(path: Path, sep: Optional[str], encoding: Optional[str],
-             nrows: Optional[int]) -> Tuple[pd.DataFrame, str, str]:
+             nrows: Optional[int]) -> pd.DataFrame:
     """
-    Loads a CSV file with automatic encoding and separator detection.
-    Returns (DataFrame, encoding_used, separator_used).
-    Raises RuntimeError if loading fails with all known encodings.
+    Loads a CSV with automatic encoding and separator detection.
+    Falls back through all candidate encodings on UnicodeDecodeError.
     """
     enc   = encoding or detect_encoding(path)
     delim = sep      or detect_separator(path, enc)
 
-    file_size = path.stat().st_size
-    if file_size > LARGE_FILE_WARNING:
-        log.warning(f"{path.name}: large file ({file_size / 1_048_576:.0f} MB) — loading may take a while")
+    log.info(f"  Separator : '{delim}'  |  Encoding : '{enc}'")
 
     kwargs: dict = dict(
         sep          = delim,
@@ -246,36 +266,74 @@ def load_csv(path: Path, sep: Optional[str], encoding: Optional[str],
     if nrows:
         kwargs["nrows"] = nrows
 
-    # Primary attempt
     try:
-        df = pd.read_csv(path, **kwargs)
-        log.info(f"  Separator : '{delim}'  |  Encoding : '{enc}'")
-        return df, enc, delim
+        return pd.read_csv(path, **kwargs)
     except UnicodeDecodeError:
-        # Fallback: try remaining encodings
-        log.warning(f"{path.name}: '{enc}' failed on full read, trying other encodings...")
+        log.warning(f"{path.name}: '{enc}' failed, trying fallback encodings...")
         for enc_alt in ENCODING_CANDIDATES:
             if enc_alt == enc:
                 continue
             try:
                 kwargs["encoding"] = enc_alt
                 df = pd.read_csv(path, **kwargs)
-                log.info(f"  Separator : '{delim}'  |  Encoding (fallback) : '{enc_alt}'")
-                return df, enc_alt, delim
+                log.info(f"  Encoding fallback : '{enc_alt}'")
+                return df
             except UnicodeDecodeError:
                 continue
         raise RuntimeError(f"Could not read {path.name} with any known encoding")
 
 # ─────────────────────────────────────────────────────────────
-# QUICK DATAFRAME METRICS
+# EXCEL LOADING
+# ─────────────────────────────────────────────────────────────
+
+def check_excel_engine(ext: str) -> None:
+    """Raises ImportError with an install hint if the required engine is missing."""
+    engine = EXCEL_ENGINES[ext]
+    pkg_map = {"openpyxl": "openpyxl", "xlrd": "xlrd", "odf": "odfpy"}
+    try:
+        __import__(pkg_map.get(engine, engine))
+    except ImportError:
+        pkg = pkg_map.get(engine, engine)
+        raise ImportError(
+            f"Engine '{engine}' required for {ext} files is not installed.\n"
+            f"    Run:  pip install {pkg}"
+        )
+
+
+def load_excel_sheets(path: Path, nrows: Optional[int]) -> Dict[str, pd.DataFrame]:
+    """
+    Loads all sheets from an Excel/ODS file.
+    Returns a dict of {sheet_name: DataFrame}.
+    """
+    ext    = path.suffix.lower()
+    engine = EXCEL_ENGINES[ext]
+    check_excel_engine(ext)
+
+    file_size = path.stat().st_size
+    if file_size > LARGE_FILE_WARNING:
+        log.warning(f"{path.name}: large file ({file_size / 1_048_576:.0f} MB) — loading may take a while")
+
+    log.info(f"  Engine : '{engine}'")
+
+    # Read all sheets at once
+    kwargs: dict = dict(sheet_name=None, engine=engine)
+    if nrows:
+        kwargs["nrows"] = nrows
+
+    sheets: Dict[str, pd.DataFrame] = pd.read_excel(path, **kwargs)
+    log.info(f"  Sheets found : {list(sheets.keys())}")
+    return sheets
+
+# ─────────────────────────────────────────────────────────────
+# METRICS
 # ─────────────────────────────────────────────────────────────
 
 def compute_metrics(df: pd.DataFrame, path: Path, sampled: bool) -> Dict:
-    """Computes a quick set of quality metrics for console display and the final summary."""
-    size      = path.stat().st_size
-    size_str  = f"{size / 1_048_576:.1f} MB" if size >= 1_048_576 else f"{size / 1_024:.0f} KB"
-    miss_pct  = round(df.isnull().mean().mean() * 100, 2)
-    dups      = int(df.duplicated().sum())
+    """Computes a quick set of quality metrics for display and the final summary."""
+    size     = path.stat().st_size
+    size_str = f"{size / 1_048_576:.1f} MB" if size >= 1_048_576 else f"{size / 1_024:.0f} KB"
+    miss_pct = round(df.isnull().mean().mean() * 100, 2)
+    dups     = int(df.duplicated().sum())
 
     return {
         "file":        path.name,
@@ -289,10 +347,10 @@ def compute_metrics(df: pd.DataFrame, path: Path, sampled: bool) -> Dict:
     }
 
 
-def print_metrics(m: Dict) -> None:
-    sample_note = "  ← sample" if m["sampled"] else ""
-    log.info(f"  File             : {m['file']}  ({m['file_size']})")
-    log.info(f"  Rows analyzed    : {m['rows']:,}{sample_note}")
+def print_metrics(m: Dict, sheet_name: str = "") -> None:
+    label = f" / sheet '{sheet_name}'" if sheet_name else ""
+    log.info(f"  File             : {m['file']}{label}  ({m['file_size']})")
+    log.info(f"  Rows analyzed    : {m['rows']:,}" + ("  ← sample" if m["sampled"] else ""))
     log.info(f"  Columns          : {m['columns']}")
     log.info(f"  Global missing   : {m['missing_pct']} %")
     log.info(f"  Duplicate rows   : {m['duplicates']:,}  ({m['dup_pct']} %)")
@@ -349,16 +407,15 @@ def build_profiler_config(df: pd.DataFrame, minimal: bool) -> Tuple[dict, str]:
 # REPORT GENERATION
 # ─────────────────────────────────────────────────────────────
 
-def generate_report(df: pd.DataFrame, csv_stem: str, config: dict,
+def generate_report(df: pd.DataFrame, stem: str, config: dict,
                     lang: str, translations_loaded: bool) -> Path:
     """
     Generates the HTML report for a given language.
     Returns the path of the generated file.
-    Raises an exception on failure.
     """
     info   = LANGUAGES[lang]
-    output = REPORTS_DIR / f"{csv_stem}{info['suffix']}.html"
-    title  = f"{info['title_prefix']} — {csv_stem}"
+    output = REPORTS_DIR / f"{stem}{info['suffix']}.html"
+    title  = f"{info['title_prefix']} — {stem}"
 
     log.info(f"  Generating report {info['flag']} {info['label']}...")
 
@@ -367,61 +424,51 @@ def generate_report(df: pd.DataFrame, csv_stem: str, config: dict,
         kwargs["locale"] = "es"
 
     t = time.time()
-    profile = ProfileReport(df, **kwargs)
-    profile.to_file(str(output))
+    ProfileReport(df, **kwargs).to_file(str(output))
 
     size_mb = output.stat().st_size / 1_048_576
     log.info(f"  ✅ {output.name}  ({size_mb:.1f} MB, {time.time() - t:.0f}s)")
     return output
 
 # ─────────────────────────────────────────────────────────────
-# FULL CSV PROCESSING PIPELINE
+# SHEET PROCESSING (shared by CSV and Excel)
 # ─────────────────────────────────────────────────────────────
 
-def process_csv(path: Path, args: argparse.Namespace,
-                translations_loaded: bool) -> FileResult:
-    """Runs the full pipeline for a single CSV file and returns a FileResult."""
-    result   = FileResult(name=path.name)
-    t_start  = time.time()
-
-    log.info(f"\n{'─' * 60}")
-    log.info(f"  Processing: {path.name}")
-    log.info(f"{'─' * 60}")
-
-    # 1. Load ───────────────────────────────────────────────
-    try:
-        df, enc, delim = load_csv(path, args.sep, args.encoding, args.sample)
-    except Exception as e:
-        log.error(f"Failed to load {path.name}: {e}")
-        log.debug(traceback.format_exc())
-        result.error = str(e)
-        return result
+def process_sheet(df: pd.DataFrame, path: Path, stem: str,
+                  sheet_name: str, args: argparse.Namespace,
+                  translations_loaded: bool) -> SheetResult:
+    """
+    Runs the profiling pipeline for a single DataFrame (one CSV or one Excel sheet).
+    Returns a SheetResult with metrics and status.
+    """
+    result  = SheetResult(file_name=path.name, sheet_name=sheet_name)
+    t_start = time.time()
 
     sampled = args.sample is not None and len(df) == args.sample
 
-    # 2. Metrics ────────────────────────────────────────────
+    # Metrics
     metrics = compute_metrics(df, path, sampled)
-    print_metrics(metrics)
+    print_metrics(metrics, sheet_name)
     result.rows        = metrics["rows"]
     result.columns     = metrics["columns"]
     result.missing_pct = metrics["missing_pct"]
     result.duplicates  = metrics["duplicates"]
     result.file_size   = metrics["file_size"]
 
-    # 3. Profiler configuration ─────────────────────────────
+    # Profiler config
     config, mode = build_profiler_config(df, args.minimal)
     result.analysis_mode = mode
 
-    # 4. Report generation ──────────────────────────────────
+    # Report generation
     langs_to_generate = ["es", "en"] if args.lang == "both" else [args.lang]
     all_ok = True
 
     for lang in langs_to_generate:
         try:
-            out = generate_report(df, path.stem, config, lang, translations_loaded)
+            out = generate_report(df, stem, config, lang, translations_loaded)
             result.reports.append(out.name)
         except Exception as e:
-            log.error(f"Failed to generate '{lang}' report for {path.name}: {e}")
+            log.error(f"Failed to generate '{lang}' report for '{stem}': {e}")
             log.debug(traceback.format_exc())
             all_ok = False
 
@@ -430,37 +477,98 @@ def process_csv(path: Path, args: argparse.Namespace,
     return result
 
 # ─────────────────────────────────────────────────────────────
+# CSV FILE PIPELINE
+# ─────────────────────────────────────────────────────────────
+
+def process_csv_file(path: Path, args: argparse.Namespace,
+                     translations_loaded: bool) -> List[SheetResult]:
+    """Loads and profiles a CSV file. Returns a list with one SheetResult."""
+    log.info(f"\n{'─' * 60}")
+    log.info(f"  Processing CSV: {path.name}")
+    log.info(f"{'─' * 60}")
+
+    result = SheetResult(file_name=path.name)
+    try:
+        df = load_csv(path, args.sep, args.encoding, args.sample)
+    except Exception as e:
+        log.error(f"Failed to load {path.name}: {e}")
+        log.debug(traceback.format_exc())
+        result.error = str(e)
+        return [result]
+
+    return [process_sheet(df, path, path.stem, "", args, translations_loaded)]
+
+# ─────────────────────────────────────────────────────────────
+# EXCEL FILE PIPELINE
+# ─────────────────────────────────────────────────────────────
+
+def process_excel_file(path: Path, args: argparse.Namespace,
+                       translations_loaded: bool) -> List[SheetResult]:
+    """
+    Loads all sheets from an Excel/ODS file and profiles each one.
+    Returns one SheetResult per sheet.
+    """
+    log.info(f"\n{'─' * 60}")
+    log.info(f"  Processing Excel: {path.name}")
+    log.info(f"{'─' * 60}")
+
+    # Load all sheets
+    try:
+        sheets = load_excel_sheets(path, args.sample)
+    except Exception as e:
+        log.error(f"Failed to load {path.name}: {e}")
+        log.debug(traceback.format_exc())
+        return [SheetResult(file_name=path.name, error=str(e))]
+
+    results = []
+    for sheet_name, df in sheets.items():
+        log.info(f"\n  ── Sheet: '{sheet_name}' ──")
+
+        # Build a unique stem: filename__sheetname
+        safe_sheet = sheet_name.replace(" ", "_").replace("/", "-")
+        stem       = f"{path.stem}__{safe_sheet}"
+
+        result = process_sheet(df, path, stem, sheet_name, args, translations_loaded)
+        results.append(result)
+
+    return results
+
+# ─────────────────────────────────────────────────────────────
 # FINAL SUMMARY
 # ─────────────────────────────────────────────────────────────
 
-def print_final_summary(results: List[FileResult], total_time: float) -> None:
+def print_final_summary(results: List[SheetResult], total_time: float) -> None:
     ok_results  = [r for r in results if r.ok]
     err_results = [r for r in results if not r.ok]
 
-    log.info(f"\n{'═' * 60}")
+    log.info(f"\n{'═' * 70}")
     log.info("  EXECUTION SUMMARY")
-    log.info(f"{'═' * 60}")
-    log.info(f"  Total time            : {total_time:.1f}s")
-    log.info(f"  ✅ Files processed     : {len(ok_results)}")
+    log.info(f"{'═' * 70}")
+    log.info(f"  Total time             : {total_time:.1f}s")
+    log.info(f"  ✅ Sheets processed     : {len(ok_results)}")
 
     if err_results:
-        log.info(f"  ❌ Files with errors   : {len(err_results)}")
+        log.info(f"  ❌ Sheets with errors   : {len(err_results)}")
         for r in err_results:
-            log.info(f"       • {r.name}: {r.error}")
+            log.info(f"       • {r.display_name}: {r.error}")
 
     if ok_results:
-        log.info(f"\n  {'File':<35} {'Rows':>8} {'Cols':>5} {'Missing%':>9} {'Dups':>7} {'Mode':<10} {'Time':>7}")
-        log.info(f"  {'─' * 35} {'─' * 8} {'─' * 5} {'─' * 9} {'─' * 7} {'─' * 10} {'─' * 7}")
+        col = 40
+        log.info(
+            f"\n  {'File / Sheet':<{col}} {'Rows':>8} {'Cols':>5} "
+            f"{'Missing%':>9} {'Dups':>7} {'Mode':<10} {'Time':>7}"
+        )
+        log.info(f"  {'─' * col} {'─' * 8} {'─' * 5} {'─' * 9} {'─' * 7} {'─' * 10} {'─' * 7}")
         for r in ok_results:
             log.info(
-                f"  {r.name:<35} {r.rows:>8,} {r.columns:>5} "
+                f"  {r.display_name:<{col}} {r.rows:>8,} {r.columns:>5} "
                 f"{r.missing_pct:>8.1f}% {r.duplicates:>7,} "
                 f"{r.analysis_mode:<10} {r.total_time:>6.1f}s"
             )
 
     log.info(f"\n  Reports available at : {REPORTS_DIR}")
     log.info(f"  Logs saved at        : {LOGS_DIR}")
-    log.info(f"{'═' * 60}\n")
+    log.info(f"{'═' * 70}\n")
 
 # ─────────────────────────────────────────────────────────────
 # ARGUMENT PARSING
@@ -468,14 +576,17 @@ def print_final_summary(results: List[FileResult], total_time: float) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate HTML data quality reports for all CSV files in data/",
+        description="Generate HTML data quality reports for all files in data/",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+Supported formats: .csv  .xlsx  .xls  .ods
+Excel files with multiple sheets generate one report per sheet.
+
 Examples:
-  python csv_quality_report.py
-  python csv_quality_report.py --lang both
-  python csv_quality_report.py --sep ";" --encoding latin-1
-  python csv_quality_report.py --sample 100000 --minimal
+  python data_quality_report.py
+  python data_quality_report.py --lang both
+  python data_quality_report.py --sep ";" --encoding latin-1
+  python data_quality_report.py --sample 100000 --minimal
         """
     )
     parser.add_argument(
@@ -484,15 +595,15 @@ Examples:
     )
     parser.add_argument(
         "--sep", default=None,
-        help="Column separator (auto-detected if not provided)"
+        help="CSV column separator (auto-detected if not provided)"
     )
     parser.add_argument(
         "--encoding", default=None,
-        help="File encoding (auto-detected if not provided)"
+        help="CSV file encoding (auto-detected if not provided)"
     )
     parser.add_argument(
         "--sample", type=int, default=None, metavar="N",
-        help="Analyze only the first N rows per file"
+        help="Analyze only the first N rows per sheet"
     )
     parser.add_argument(
         "--minimal", action="store_true",
@@ -509,7 +620,7 @@ def main() -> None:
     log = setup_logging()
 
     log.info("╔══════════════════════════════════════════════════════╗")
-    log.info("║   CSV DATA QUALITY ANALYZER — ydata-profiling       ║")
+    log.info("║     DATA QUALITY ANALYZER — ydata-profiling         ║")
     log.info("╚══════════════════════════════════════════════════════╝")
 
     args = parse_args()
@@ -525,11 +636,11 @@ def main() -> None:
         else:
             translations_loaded = load_translations()
 
-    # Discover CSV files
-    csv_files = find_csv_files()
-    if not csv_files:
-        log.warning(f"No .csv files found in: {DATA_DIR}")
-        log.warning("Place your CSV files in that folder and run the script again.")
+    # Discover files
+    data_files = find_data_files()
+    if not data_files:
+        log.warning(f"No supported files found in: {DATA_DIR}")
+        log.warning(f"Supported extensions: {', '.join(sorted(ALL_EXTENSIONS))}")
         sys.exit(0)
 
     lang_label = {"es": "Spanish 🇪🇸", "en": "English 🇬🇧", "both": "Spanish 🇪🇸 + English 🇬🇧"}
@@ -537,19 +648,23 @@ def main() -> None:
     log.info(f"  Data dir        : {DATA_DIR}")
     log.info(f"  Reports dir     : {REPORTS_DIR}")
     log.info(f"  Language(s)     : {lang_label[args.lang]}")
-    log.info(f"  CSV files found : {len(csv_files)}")
-    for f in csv_files:
+    log.info(f"  Files found     : {len(data_files)}")
+    for f in data_files:
         log.info(f"    • {f.name}")
 
-    # Process each CSV
+    # Process each file
     t_start = time.time()
-    results: List[FileResult] = []
+    all_results: List[SheetResult] = []
 
-    for path in csv_files:
-        result = process_csv(path, args, translations_loaded)
-        results.append(result)
+    for path in data_files:
+        ext = path.suffix.lower()
+        if ext in CSV_EXTENSIONS:
+            results = process_csv_file(path, args, translations_loaded)
+        else:
+            results = process_excel_file(path, args, translations_loaded)
+        all_results.extend(results)
 
-    print_final_summary(results, round(time.time() - t_start, 1))
+    print_final_summary(all_results, round(time.time() - t_start, 1))
 
 
 if __name__ == "__main__":
