@@ -1,3 +1,4 @@
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 # Data Quality Analyzer
 
 Automatically generates HTML data quality reports for all files in the `data/` folder, using [ydata-profiling](https://github.com/ydataai/ydata-profiling).
