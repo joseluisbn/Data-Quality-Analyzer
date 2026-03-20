@@ -1,33 +1,11 @@
 """
-Data Quality Analyzer using ydata-profiling
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Data Quality Analyzer using ydata-profiling.
 
-Supported formats: CSV, XLSX, XLS, ODS
-Excel files with multiple sheets generate one report per sheet.
+Generates HTML quality reports for all CSV and Excel files in data/.
+Supported formats: .csv  .xlsx  .xls  .ods
+Excel files with multiple sheets produce one report per sheet.
 
-Project structure:
-    root/
-    ├── data_quality_report.py  ← this script
-    ├── lang/                   ← translation files (es.json, ...)
-    ├── data/                   ← files to analyze (.csv, .xlsx, .xls, .ods)
-    ├── reports/                ← generated HTML reports
-    └── logs/                   ← execution logs (auto-created)
-
-Installation:
-    pip install ydata-profiling-multilingual pandas openpyxl xlrd odfpy
-
-    If ydata-profiling was already installed:
-        pip uninstall ydata-profiling
-        pip install ydata-profiling-multilingual pandas openpyxl xlrd odfpy
-
-Usage:
-    python data_quality_report.py                    # Spanish by default
-    python data_quality_report.py --lang en          # English only
-    python data_quality_report.py --lang both        # both languages
-    python data_quality_report.py --sep ";"          # CSV separator (manual)
-    python data_quality_report.py --encoding latin-1 # CSV encoding (manual)
-    python data_quality_report.py --sample 50000     # limit rows per sheet
-    python data_quality_report.py --minimal          # fast mode
+See README.md for installation instructions and usage examples.
 """
 
 # ─────────────────────────────────────────────────────────────
@@ -360,44 +338,109 @@ def print_metrics(m: Dict, sheet_name: str = "") -> None:
 # ─────────────────────────────────────────────────────────────
 
 def build_profiler_config(df: pd.DataFrame, minimal: bool) -> Tuple[dict, str]:
-    """Returns (config_dict, mode_name) adapted to the dataset size."""
+    """
+    Returns (config_dict, mode_name) adapted to the dataset size.
+
+    Three tiers:
+      - minimal  : fast pass, basic stats only (forced for > 5M cells or --minimal flag)
+      - optimized: medium datasets, Pearson + Spearman, no interactions
+      - full     : all correlations, interactions, word/character analysis, sensitive
+                   data detection, explorative mode — everything the library offers
+    """
     n_cells = df.size
 
+    # ── MINIMAL ───────────────────────────────────────────────
     if minimal or n_cells > THRESHOLD_MINIMAL:
         mode   = "minimal (forced)" if not minimal else "minimal (manual)"
         config = dict(minimal=True, progress_bar=True)
 
+    # ── OPTIMIZED ─────────────────────────────────────────────
     elif n_cells > THRESHOLD_OPTIMIZED:
         mode   = "optimized"
         config = dict(
             minimal      = False,
+            explorative  = True,          # extra statistical checks
+            sensitive    = True,          # detect emails, IPs, phone numbers…
             progress_bar = True,
+            # Correlations: Pearson + Spearman (Kendall/phi_k too slow at this size)
             correlations = {
-                "pearson":  {"calculate": True},
-                "spearman": {"calculate": False},
+                "auto":     {"calculate": True,  "warn_high_correlations": True,  "threshold": 0.9},
+                "pearson":  {"calculate": True,  "warn_high_correlations": True,  "threshold": 0.9},
+                "spearman": {"calculate": True,  "warn_high_correlations": True,  "threshold": 0.9},
                 "kendall":  {"calculate": False},
                 "phi_k":    {"calculate": False},
-                "cramers":  {"calculate": False},
+                "cramers":  {"calculate": True,  "warn_high_correlations": True,  "threshold": 0.9},
             },
             interactions     = {"continuous": False},
-            missing_diagrams = {"bar": True, "matrix": False, "heatmap": False},
+            missing_diagrams = {"bar": True, "matrix": True, "heatmap": False},
             samples          = {"head": 10, "tail": 10},
+            # Variable-level options
+            vars = {
+                "num": {
+                    "quantiles":               [0.05, 0.25, 0.5, 0.75, 0.95],
+                    "skewness_threshold":      20,
+                    "low_categorical_threshold": 5,
+                    "chi_squared_threshold":   0.999,
+                },
+                "cat": {
+                    "length":    True,
+                    "characters": False,   # too slow at this size
+                    "words":     False,    # too slow at this size
+                    "n_obs":     10,
+                    "chi_squared_threshold": 0.999,
+                    "imbalance_threshold":   0.5,
+                },
+                "bool": {
+                    "n_obs":               3,
+                    "imbalance_threshold": 0.5,
+                },
+            },
         )
+
+    # ── FULL ──────────────────────────────────────────────────
     else:
         mode   = "full"
         config = dict(
             minimal      = False,
+            explorative  = True,          # extra statistical checks
+            sensitive    = True,          # detect emails, IPs, phone numbers…
             progress_bar = True,
+            # All correlation matrices enabled with high-correlation warnings
             correlations = {
-                "pearson":  {"calculate": True},
-                "spearman": {"calculate": True},
-                "kendall":  {"calculate": False},
-                "phi_k":    {"calculate": True},
-                "cramers":  {"calculate": True},
+                "auto":     {"calculate": True,  "warn_high_correlations": True,  "threshold": 0.9},
+                "pearson":  {"calculate": True,  "warn_high_correlations": True,  "threshold": 0.9},
+                "spearman": {"calculate": True,  "warn_high_correlations": True,  "threshold": 0.9},
+                "kendall":  {"calculate": True,  "warn_high_correlations": True,  "threshold": 0.9},
+                "phi_k":    {"calculate": True,  "warn_high_correlations": True,  "threshold": 0.9},
+                "cramers":  {"calculate": True,  "warn_high_correlations": True,  "threshold": 0.9},
             },
+            # Scatter plots for all continuous variable pairs
             interactions     = {"continuous": True},
+            # All missing-value visualizations
             missing_diagrams = {"bar": True, "matrix": True, "heatmap": True},
-            samples          = {"head": 10, "tail": 10},
+            # Show more sample rows
+            samples          = {"head": 20, "tail": 20},
+            # Variable-level options — everything on
+            vars = {
+                "num": {
+                    "quantiles":                [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95],
+                    "skewness_threshold":       20,
+                    "low_categorical_threshold": 5,
+                    "chi_squared_threshold":    0.999,
+                },
+                "cat": {
+                    "length":    True,    # string length stats
+                    "characters": True,   # Unicode character distribution
+                    "words":     True,    # word frequency analysis
+                    "n_obs":     10,      # top N values shown
+                    "chi_squared_threshold": 0.999,
+                    "imbalance_threshold":   0.5,
+                },
+                "bool": {
+                    "n_obs":               3,
+                    "imbalance_threshold": 0.5,
+                },
+            },
         )
 
     log.info(f"  Profiler mode    : {mode}  ({n_cells:,} cells)")
