@@ -1,15 +1,18 @@
-# CSV Data Quality Analyzer
+# Data Quality Analyzer
 
-Automatically generates HTML data quality reports for all CSV files in the `data/` folder, using [ydata-profiling](https://github.com/ydataai/ydata-profiling).
+Automatically generates HTML data quality reports for all files in the `data/` folder, using [ydata-profiling](https://github.com/ydataai/ydata-profiling).
+
+Supported formats: **CSV**, **XLSX**, **XLS**, **ODS**
+Excel files with multiple sheets generate one report per sheet.
 
 ## Project structure
 
 ```
 root/
-├── csv_quality_report.py   ← main script
+├── data_quality_report.py  ← main script
 ├── lang/
 │   └── es.json             ← Spanish translation
-├── data/                   ← place your CSV files here
+├── data/                   ← place your files here (.csv, .xlsx, .xls, .ods)
 ├── reports/                ← generated HTML reports
 └── logs/                   ← execution logs (auto-created)
 ```
@@ -17,42 +20,43 @@ root/
 ## Installation
 
 ```bash
-pip install ydata-profiling-multilingual pandas
+pip install -r requirements.txt
 ```
 
 > If `ydata-profiling` was already installed:
 > ```bash
 > pip uninstall ydata-profiling
-> pip install ydata-profiling-multilingual pandas
+> pip install -r requirements.txt
 > ```
 
 ## Usage
 
 ```bash
 # Spanish report (default)
-python csv_quality_report.py
+python data_quality_report.py
 
 # English report
-python csv_quality_report.py --lang en
+python data_quality_report.py --lang en
 
-# Both languages (generates two HTML files per CSV)
-python csv_quality_report.py --lang both
+# Both languages (two HTML files per sheet)
+python data_quality_report.py --lang both
 
-# Manual separator and encoding
-python csv_quality_report.py --sep ";" --encoding latin-1
+# Manual CSV separator and encoding
+python data_quality_report.py --sep ";" --encoding latin-1
 
-# Analyze only the first 100,000 rows (recommended for large files)
-python csv_quality_report.py --sample 100000
+# Analyze only the first 100,000 rows per sheet
+python data_quality_report.py --sample 100000
 
 # Fast mode — skips correlations and interactions
-python csv_quality_report.py --minimal
+python data_quality_report.py --minimal
 ```
 
 ## How it works
 
-1. Scans `data/` for `.csv` files
-2. Auto-detects separator (`,` `;` `\t` `|`) and encoding (`utf-8`, `latin-1`, `cp1252`...)
-3. Adapts the profiler configuration to the dataset size:
+1. Scans `data/` for `.csv`, `.xlsx`, `.xls` and `.ods` files
+2. **CSV**: auto-detects separator and encoding
+3. **Excel / ODS**: reads all sheets and generates one report per sheet
+4. Adapts profiler configuration to dataset size:
 
 | Dataset size | Mode | What's included |
 |---|---|---|
@@ -60,19 +64,18 @@ python csv_quality_report.py --minimal
 | 1M – 5M cells | **Optimized** | Pearson correlation only, no interactions |
 | > 5M cells | **Minimal** | Basic statistics, fastest |
 
-4. Generates one HTML report per language in `reports/`
-5. Saves a timestamped log in `logs/`
+5. Saves HTML reports in `reports/` — named `<file>__<sheet>_informe_calidad.html`
+6. Saves a timestamped execution log in `logs/`
 
 ## Adding a new language
 
 Place a `<locale>.json` file inside `lang/` following the same structure as `es.json`, then run:
 
 ```bash
-python csv_quality_report.py --lang <locale>
+python data_quality_report.py --lang <locale>
 ```
 
 ## Requirements
 
 - Python 3.9+
-- `ydata-profiling-multilingual`
-- `pandas`
+- See `requirements.txt`
