@@ -16,6 +16,7 @@ import argparse
 import csv
 import html
 import logging
+import re
 import sys
 import time
 import traceback
@@ -77,6 +78,9 @@ ALL_EXTENSIONS   = CSV_EXTENSIONS | EXCEL_EXTENSIONS
 # Temporary Office lock-file prefixes to skip automatically
 SKIP_PREFIXES = ("~$",)
 
+# Filename characters invalid on Windows/POSIX filesystems (used when sanitizing sheet names for output files)
+_INVALID_FILENAME_CHARS = re.compile(r'[\\/:\*?"<>|\s]+')
+
 # Size thresholds (in cells = rows × columns)
 THRESHOLD_MINIMAL   = 5_000_000   # > 5M cells → minimal mode
 THRESHOLD_OPTIMIZED = 1_000_000   # > 1M cells → optimized mode
@@ -101,15 +105,22 @@ LANGUAGES: Dict[str, Dict[str, str]] = {
 # LOGGING (console + file simultaneously)
 # ─────────────────────────────────────────────────────────────
 
+_logger: Optional[logging.Logger] = None
+
 
 def setup_logging(logs_dir: Path) -> None:
     """Configures the shared 'data_quality' logger: console (INFO) + file (DEBUG)."""
+    global _logger
     logs_dir.mkdir(exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path  = logs_dir / f"{timestamp}.log"
 
     logger = logging.getLogger("data_quality")
     logger.setLevel(logging.DEBUG)
+
+    if logger.handlers:          # guard against duplicate handlers on repeated calls
+        _logger = logger
+        return
 
     fmt = logging.Formatter(
         "%(asctime)s  %(levelname)-8s  %(message)s",
@@ -126,13 +137,14 @@ def setup_logging(logs_dir: Path) -> None:
 
     logger.addHandler(console_handler)
     logger.addHandler(file_handler)
+    _logger = logger
 
     logger.info(f"Log file: {log_path}")
 
 
 def log() -> logging.Logger:
     """Returns the shared logger. Safe to call from any function after setup_logging()."""
-    return logging.getLogger("data_quality")
+    return _logger if _logger is not None else logging.getLogger("data_quality")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -211,14 +223,16 @@ def load_translations() -> bool:
 # ─────────────────────────────────────────────────────────────
 
 
-def find_data_files(exclude: List[str]) -> List[Path]:
+def find_data_files(exclude: List[str], recursive: bool = False) -> List[Path]:
     """
     Returns all supported files in data/, sorted alphabetically.
     Skips temporary Office lock files (~$...) and names in --exclude.
+    With recursive=True, also scans subdirectories of data/.
     """
     excluded_lower = {e.lower() for e in exclude}
+    scan = DATA_DIR.rglob("*") if recursive else DATA_DIR.iterdir()
     files = sorted(
-        p for p in DATA_DIR.iterdir()
+        p for p in scan
         if p.is_file()
         and p.suffix.lower() in ALL_EXTENSIONS
         and not any(p.name.startswith(pfx) for pfx in SKIP_PREFIXES)
@@ -329,15 +343,19 @@ def load_csv(
     sep: Optional[str],
     encoding: Optional[str],
     nrows: Optional[int],
-) -> pd.DataFrame:
+) -> Tuple[pd.DataFrame, bool]:
     """
     Loads a CSV with automatic encoding and separator detection.
     Falls back through all candidate encodings on UnicodeDecodeError.
+    Returns (DataFrame, sampled) where sampled is True if the file was truncated.
     """
     enc   = encoding or detect_encoding(path)
     delim = sep      or detect_separator(path, enc)
 
     log().info(f"  Separator : '{delim}'  |  Encoding : '{enc}'")
+
+    # Read one extra row to distinguish truncation from an exact row-count match
+    read_nrows = (nrows + 1) if nrows else None
 
     kwargs: dict = dict(
         sep          = delim,
@@ -345,13 +363,14 @@ def load_csv(
         low_memory   = False,
         on_bad_lines = "warn",
     )
-    if nrows:
-        kwargs["nrows"] = nrows
+    if read_nrows:
+        kwargs["nrows"] = read_nrows
 
     try:
-        return pd.read_csv(path, **kwargs)
+        df = pd.read_csv(path, **kwargs)
     except UnicodeDecodeError:
         log().warning(f"{path.name}: '{enc}' failed, trying fallback encodings...")
+        df = None
         for enc_alt in ENCODING_CANDIDATES:
             if enc_alt == enc:
                 continue
@@ -359,10 +378,16 @@ def load_csv(
                 kwargs["encoding"] = enc_alt
                 df = pd.read_csv(path, **kwargs)
                 log().info(f"  Encoding fallback : '{enc_alt}'")
-                return df
+                break
             except UnicodeDecodeError:
                 continue
-        raise RuntimeError(f"Could not read {path.name} with any known encoding")
+        if df is None:
+            raise RuntimeError(f"Could not read {path.name} with any known encoding")
+
+    sampled = nrows is not None and len(df) > nrows
+    if sampled:
+        df = df.iloc[:nrows]
+    return df, sampled
 
 
 # ─────────────────────────────────────────────────────────────
@@ -384,10 +409,11 @@ def check_excel_engine(ext: str) -> None:
         )
 
 
-def load_excel_sheets(path: Path, nrows: Optional[int]) -> Dict[str, pd.DataFrame]:
+def load_excel_sheets(path: Path, nrows: Optional[int]) -> Dict[str, Tuple[pd.DataFrame, bool]]:
     """
     Loads all sheets from an Excel/ODS file.
-    Returns a dict of {sheet_name: DataFrame}.
+    Returns a dict of {sheet_name: (DataFrame, sampled)} where sampled is True
+    if that sheet was truncated by the nrows limit.
     """
     ext    = path.suffix.lower()
     engine = EXCEL_ENGINES[ext]
@@ -395,13 +421,20 @@ def load_excel_sheets(path: Path, nrows: Optional[int]) -> Dict[str, pd.DataFram
 
     log().info(f"  Engine : '{engine}'")
 
+    # Read one extra row per sheet to distinguish truncation from an exact row-count match
+    read_nrows = (nrows + 1) if nrows else None
     kwargs: dict = dict(sheet_name=None, engine=engine)
-    if nrows:
-        kwargs["nrows"] = nrows
+    if read_nrows:
+        kwargs["nrows"] = read_nrows
 
-    sheets: Dict[str, pd.DataFrame] = pd.read_excel(path, **kwargs)
-    log().info(f"  Sheets found : {list(sheets.keys())}")
-    return sheets
+    raw: Dict[str, pd.DataFrame] = pd.read_excel(path, **kwargs)
+    log().info(f"  Sheets found : {list(raw.keys())}")
+
+    result: Dict[str, Tuple[pd.DataFrame, bool]] = {}
+    for name, df in raw.items():
+        truncated = nrows is not None and len(df) > nrows
+        result[name] = (df.iloc[:nrows] if truncated else df, truncated)
+    return result
 
 
 # ─────────────────────────────────────────────────────────────
@@ -588,6 +621,7 @@ def process_sheet(
     args: argparse.Namespace,
     translations_loaded: bool,
     reports_dir: Path,
+    sampled: bool = False,
 ) -> SheetResult:
     """
     Runs the profiling pipeline for a single DataFrame (one CSV or one Excel sheet).
@@ -595,8 +629,6 @@ def process_sheet(
     """
     result  = SheetResult(file_name=path.name, sheet_name=sheet_name)
     t_start = time.time()
-
-    sampled = args.sample is not None and len(df) == args.sample
 
     # Metrics
     metrics = compute_metrics(df, path, sampled)
@@ -654,14 +686,14 @@ def process_csv_file(
         return [result]
 
     try:
-        df = load_csv(path, args.sep, args.encoding, args.sample)
+        df, sampled = load_csv(path, args.sep, args.encoding, args.sample)
     except Exception as e:
         log().error(f"Failed to load {path.name}: {e}")
         log().debug(traceback.format_exc())
         result.error = str(e)
         return [result]
 
-    return [process_sheet(df, path, path.stem, "", args, translations_loaded, reports_dir)]
+    return [process_sheet(df, path, path.stem, "", args, translations_loaded, reports_dir, sampled)]
 
 
 # ─────────────────────────────────────────────────────────────
@@ -696,11 +728,11 @@ def process_excel_file(
         return [SheetResult(file_name=path.name, error=str(e))]
 
     results = []
-    for sheet_name, df in sheets.items():
+    for sheet_name, (df, sampled) in sheets.items():
         log().info(f"\n  ── Sheet: '{sheet_name}' ──")
-        safe_sheet = sheet_name.replace(" ", "_").replace("/", "-")
+        safe_sheet = _INVALID_FILENAME_CHARS.sub("_", sheet_name).strip("_") or "sheet"
         stem       = f"{path.stem}__{safe_sheet}"
-        result     = process_sheet(df, path, stem, sheet_name, args, translations_loaded, reports_dir)
+        result     = process_sheet(df, path, stem, sheet_name, args, translations_loaded, reports_dir, sampled)
         results.append(result)
 
     return results
@@ -870,13 +902,13 @@ Supported formats: .csv  .xlsx  .xls  .ods
 Excel files with multiple sheets generate one report per sheet.
 
 Examples:
-  python data_quality_report.py
-  python data_quality_report.py --lang both
-  python data_quality_report.py --sep ";" --encoding latin-1
-  python data_quality_report.py --sample 100000 --minimal
-  python data_quality_report.py --output-dir /tmp/my_reports
-  python data_quality_report.py --exclude draft.csv ~temp.xlsx
-  python data_quality_report.py --max-size 4096
+  python data_quality_analyzer.py
+  python data_quality_analyzer.py --lang both
+  python data_quality_analyzer.py --sep ";" --encoding latin-1
+  python data_quality_analyzer.py --sample 100000 --minimal
+  python data_quality_analyzer.py --output-dir /tmp/my_reports
+  python data_quality_analyzer.py --exclude draft.csv ~temp.xlsx
+  python data_quality_analyzer.py --max-size 4096
         """,
     )
     parser.add_argument(
@@ -906,6 +938,10 @@ Examples:
     parser.add_argument(
         "--exclude", nargs="+", default=[], metavar="FILE",
         help="File names in data/ to skip  (e.g. --exclude bad.csv temp.xlsx)",
+    )
+    parser.add_argument(
+        "--recursive", action="store_true",
+        help="Also scan subdirectories of data/ recursively",
     )
     parser.add_argument(
         "--max-size", type=int, default=DEFAULT_MAX_FILE_MB, metavar="MB",
@@ -945,7 +981,7 @@ def main() -> None:
             translations_loaded = load_translations()
 
     # Discover files
-    data_files = find_data_files(args.exclude)
+    data_files = find_data_files(args.exclude, args.recursive)
     if not data_files:
         log().warning(f"No supported files found in: {DATA_DIR}")
         log().warning(f"Supported extensions: {', '.join(sorted(ALL_EXTENSIONS))}")

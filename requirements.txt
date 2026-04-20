@@ -10,6 +10,7 @@
 # Core
 ydata-profiling-multilingual>=1.1.1
 pandas>=1.5.0
+charset-normalizer>=3.0.0  # optional: better CSV encoding detection
  
 # Excel / ODS support
 openpyxl>=3.0.0    # .xlsx

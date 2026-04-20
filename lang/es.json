@@ -143,7 +143,7 @@
         "3rd_row": "3ª fila",
         "4th_row": "4ª fila",
         "5th_row": "5ª fila",
-        "categories_passes_threshold ": "El número de categorías supera el umbral (<code>config.plot.cat_freq.max_unique</code>)",
+        "categories_passes_threshold": "El número de categorías supera el umbral (<code>config.plot.cat_freq.max_unique</code>)",
         "common_values_plot": "Valores comunes (gráfico)",
         "common_words": "Palabras comunes",
         "wordcloud": "Nube de palabras",
@@ -227,10 +227,10 @@
         "fragment": "Fragmento",
         "heatmap": "Mapa de calor",
         "pearson's r": "r de Pearson",
-        "spearman's Ï": "Ï de Spearman",
-        "kendall's Ï„": "Ï„ de Kendall",
-        "phik (Ï†k)": "Phik (Ï†k)",
-        "cramÃ©r's V (Ï†c)": "V de Cramér (Ï†c)",
+        "spearman's ρ": "ρ de Spearman",
+        "kendall's τ": "τ de Kendall",
+        "phik (φk)": "Phik (φk)",
+        "cramér's V (φc)": "V de Cramér (φc)",
         "auto": "Auto"
       }
     }
